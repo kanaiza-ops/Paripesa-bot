@@ -1,0 +1,25 @@
+{
+  "name": "paripesa-bot-v2",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.js",
+    "dev": "node index.js"
+  },
+  "keywords": ["paripesa", "betting", "predictions", "telegram"],
+  "author": "",
+  "license": "ISC",
+  "description": "Real-time Paripesa betting predictions via Telegram",
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "axios": "^1.14.0",
+    "better-sqlite3": "^12.8.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.1",
+    "puppeteer": "^24.40.0",
+    "telegraf": "^4.16.3"
+  }
+}

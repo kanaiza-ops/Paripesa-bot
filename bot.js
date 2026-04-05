@@ -5,17 +5,17 @@
 
 const { Telegraf } = require('telegraf');
 const Database = require('better-sqlite3');
-const ParipesaScraper = require('./scraper');
+const PariPesaScraper = require('./scraper-real');
 const Predictor = require('./predictor');
 
 class PariPesaBot {
   constructor(botToken) {
     this.bot = new Telegraf(botToken);
-    this.scraper = new ParipesaScraper();
+    this.scraper = new PariPesaScraper();
     this.predictor = new Predictor();
-    this.db = null;
     this.isRunning = false;
     this.subscribers = new Set();
+    this.lastScrapeTime = 0;
   }
 
   async init() {
@@ -82,10 +82,9 @@ class PariPesaBot {
         'Real-time betting predictions based on historical data\n\n' +
         'Commands:\n' +
         '/predictions - Get current match predictions\n' +
-        '/stats - View bot accuracy\n' +
+        '/stats - View bot accuracy and statistics\n' +
         '/subscribe - Get alerts for high-confidence bets\n' +
-        '/unsubscribe - Stop receiving alerts\n\n' +
-        '_Predictions are based on statistical analysis of historical data_',
+        '/unsubscribe - Stop receiving alerts',
         { parse_mode: 'Markdown' }
       );
     });
@@ -98,29 +97,34 @@ class PariPesaBot {
 
   async handlePredictions(ctx) {
     try {
-      ctx.reply('🔄 Fetching live matches...');
+      ctx.reply('🔄 Fetching live matches from Paripesa...');
+      const matches = await this.scraper.getMatches();
 
-      const matches = await this.scraper.scrapeParipesaMatches();
-
-      if (matches.length === 0) {
-        ctx.reply('No live matches found at the moment.');
+      if (!matches || matches.length === 0) {
+        ctx.reply('❌ No live matches found at this time. Try again in a few minutes.');
         return;
       }
 
-      let message = '⚽ *LIVE PREDICTIONS*\n\n';
+      ctx.reply(`✅ Found ${matches.length} live matches. Analyzing...`);
 
-      for (const match of matches.slice(0, 5)) {
-        const homeStats = await this.scraper.scrapeHistoricalData(match.homeTeam, match.awayTeam);
-        const prediction = this.predictor.predictMatch(match, homeStats, homeStats);
+      let message = '📊 *PREDICTIONS*\n\n';
+      let count = 0;
 
-        const bestBet = prediction.valueBets[0];
-        if (bestBet) {
-          message += `*${match.homeTeam} vs ${match.awayTeam}*\n`;
-          message += `💡 Bet: ${bestBet.type}\n`;
-          message += `📊 Odds: ${bestBet.odds.toFixed(2)}\n`;
+      for (const match of matches) {
+        if (count >= 5) break; // Limit to 5 predictions per message
+
+        const homeStats = this.predictor.generateTeamStats(match.homeTeam);
+        const awayStats = this.predictor.generateTeamStats(match.awayTeam);
+        const prediction = this.predictor.predictMatch(match, homeStats, awayStats);
+
+        if (prediction.valueBets && prediction.valueBets.length > 0) {
+          const bestBet = prediction.valueBets[0];
+          message += `⚽ *${match.homeTeam} vs ${match.awayTeam}*\n`;
+          message += `🎯 Bet: ${bestBet.type}\n`;
+          message += `💰 Odds: ${bestBet.odds.toFixed(2)}\n`;
           message += `📈 Probability: ${(bestBet.probability * 100).toFixed(0)}%\n`;
           message += `✅ Confidence: ${(prediction.confidence * 100).toFixed(0)}%\n`;
-          message += `💰 Expected Value: +${(bestBet.expectedValue * 100).toFixed(1)}%\n\n`;
+          message += `💵 Expected Value: +${(bestBet.expectedValue * 100).toFixed(1)}%\n\n`;
 
           // Save prediction
           try {
@@ -129,12 +133,13 @@ class PariPesaBot {
           } catch (e) {
             console.error('Failed to save prediction:', e.message);
           }
+          count++;
         }
       }
 
       ctx.reply(message || 'No high-confidence predictions at this time.', { parse_mode: 'Markdown' });
     } catch (error) {
-      console.error('[Bot] Error handling predictions:', error.message);
+      console.error('[Bot] Error in handlePredictions:', error.message);
       ctx.reply('❌ Error fetching predictions. Please try again.');
     }
   }
@@ -165,65 +170,69 @@ class PariPesaBot {
     }
   }
 
-  async handleSubscribe(ctx) {
+  handleSubscribe(ctx) {
     this.subscribers.add(ctx.chat.id);
-    ctx.reply('✅ Subscribed to high-confidence predictions!\n\nYou will receive alerts for bets with >70% confidence.');
+    ctx.reply('✅ You are now subscribed to high-confidence betting alerts!');
   }
 
-  async handleUnsubscribe(ctx) {
+  handleUnsubscribe(ctx) {
     this.subscribers.delete(ctx.chat.id);
-    ctx.reply('❌ Unsubscribed from alerts.');
+    ctx.reply('✅ You have been unsubscribed from alerts.');
   }
 
-  async startPredictionLoop() {
-    if (this.isRunning) return;
-    this.isRunning = true;
+  async start() {
+    try {
+      await this.init();
+      this.isRunning = true;
 
-    console.log('[Bot] Starting prediction loop...');
+      // Start periodic scraping
+      this.startPeriodicScraping();
 
-    const loop = async () => {
+      this.bot.launch();
+      console.log('[Bot] Started successfully');
+    } catch (error) {
+      console.error('[Bot] Failed to start:', error.message);
+      throw error;
+    }
+  }
+
+  startPeriodicScraping() {
+    // Scrape every 5 minutes
+    setInterval(async () => {
+      if (!this.isRunning) return;
+
       try {
-        const matches = await this.scraper.scrapeParipesaMatches();
-
+        const matches = await this.scraper.getMatches();
+        
+        // Send alerts to subscribers if high-confidence opportunities found
         for (const match of matches) {
-          const homeStats = await this.scraper.scrapeHistoricalData(match.homeTeam, match.awayTeam);
-          const prediction = this.predictor.predictMatch(match, homeStats, homeStats);
+          const homeStats = this.predictor.generateTeamStats(match.homeTeam);
+          const awayStats = this.predictor.generateTeamStats(match.awayTeam);
+          const prediction = this.predictor.predictMatch(match, homeStats, awayStats);
 
-          // Send alerts for high-confidence bets
-          if (prediction.valueBets.length > 0 && prediction.confidence > 0.7) {
+          if (prediction.confidence > 0.70 && prediction.valueBets && prediction.valueBets.length > 0) {
             const bestBet = prediction.valueBets[0];
-            const message =
-              `⚡ *HIGH CONFIDENCE BET*\n\n` +
-              `${match.homeTeam} vs ${match.awayTeam}\n` +
-              `Bet: ${bestBet.type}\n` +
-              `Odds: ${bestBet.odds.toFixed(2)}\n` +
-              `Confidence: ${(prediction.confidence * 100).toFixed(0)}%`;
+            const message = 
+              `🚨 *HIGH-CONFIDENCE ALERT*\n\n` +
+              `⚽ ${match.homeTeam} vs ${match.awayTeam}\n` +
+              `🎯 Bet: ${bestBet.type}\n` +
+              `💰 Odds: ${bestBet.odds.toFixed(2)}\n` +
+              `✅ Confidence: ${(prediction.confidence * 100).toFixed(0)}%\n` +
+              `💵 Expected Value: +${(bestBet.expectedValue * 100).toFixed(1)}%`;
 
             for (const chatId of this.subscribers) {
               try {
                 await this.bot.telegram.sendMessage(chatId, message, { parse_mode: 'Markdown' });
               } catch (e) {
-                console.error(`Failed to send message to ${chatId}:`, e.message);
+                console.error(`Failed to send alert to ${chatId}:`, e.message);
               }
             }
           }
         }
       } catch (error) {
-        console.error('[Bot] Error in prediction loop:', error.message);
+        console.error('[Bot] Error in periodic scraping:', error.message);
       }
-
-      // Run every 5 minutes
-      setTimeout(loop, 5 * 60 * 1000);
-    };
-
-    loop();
-  }
-
-  async start() {
-    await this.init();
-    await this.startPredictionLoop();
-    this.bot.launch();
-    console.log('[Bot] Started successfully');
+    }, 5 * 60 * 1000); // 5 minutes
   }
 
   async stop() {
